@@ -1,0 +1,11 @@
+# Build outputs and local input-free configuration
+build/
+*.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+*.zip
+test-display-state
+settings.ini
+.DS_Store
