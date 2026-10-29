@@ -4,6 +4,21 @@ Windows 本机键鼠事件显示工具。使用 Raw Input 旁路接收本机键�
 
 原生 C++ / Win32 / GDI+，免驱动，不使用浏览器、Electron、ADB 或内核钩子；不录制日志、不联网。
 
+## 下载 Windows EXE
+
+- **[直接下载 KeyDisplay.exe（v1.3.0 / Windows x64）](https://github.com/AFITSAFITS/KeyDisplay/releases/download/v1.3.0/KeyDisplay.exe)**
+- **[版本发布页与全部下载附件](https://github.com/AFITSAFITS/KeyDisplay/releases/tag/v1.3.0)**
+
+下载 exe 后双击运行，无需安装。需要核对文件时下载发布页的 `SHA256SUMS.txt`，在 PowerShell 运行 `Get-FileHash .\KeyDisplay.exe -Algorithm SHA256` 并比较。
+
+> 当前 EXE 未签名。已完成交叉编译与逻辑测试，但 v1.3 的设置、穿透回归与真实显示延时尚未 Windows 实机验收。不要为运行工具关闭系统安全保护；用于延时测试前需标定工具自身显示延迟。
+
+## 功能与设置示意
+
+![KeyDisplay输入显示及毫秒设置示意](docs/images/keydisplay-overview.png)
+
+**这是一张依据源码绘制的界面示意，不是 Windows 实机截图。** 左侧说明本机输入到右下角气泡，右侧说明毫秒设置。图内按键仅为演示；新输入不会等待当前气泡消失。
+
 ## 下载版使用
 
 1. 在 Windows 10/11 x64 上运行 `KeyDisplay.exe`，无需安装。
