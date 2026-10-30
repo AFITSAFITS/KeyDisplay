@@ -57,6 +57,45 @@ Windows 本机键鼠事件显示工具。使用 Raw Input 旁路接收本机键�
 
 每次有效事件立即绘制，保留上次验证可用的分层窗口方案：`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE`，加 `UpdateLayeredWindow` 的预乘 alpha 表面。不使用 `RIDEV_NOLEGACY`、输入阻断、事件重发或注入。位图/DC 缓冲重复利用，鼠标移动不触发绘制；资源占用需在目标机器实际测量。
 
+## 与 Carnac 的差异
+
+**Carnac 更侧重演示时的按键呈现与快捷键解释；KeyDisplay 聚焦本机键鼠事件的即时可视反馈，便于录屏和输入响应测试。** 这里比较的是实现方式与当前功能边界，不是经过基准测试的性能排名，也不意味着 KeyDisplay 在所有场景都优于 Carnac。
+
+### 1. 输入接收方式不同
+
+- **Carnac 原版（Code52）**：使用 `SetWindowsHookEx(WH_KEYBOARD_LL)` 监听键盘事件；通常通过 `CallNextHookEx` 继续传递事件。[源码依据](https://github.com/Code52/carnac/blob/master/src/Carnac.Logic/KeyMonitor/InterceptKeys.cs)
+- **KeyDisplay v1.3.1**：使用 `RegisterRawInputDevices` + `RIDEV_INPUTSINK` 接收键盘、鼠标的 `WM_INPUT`，不安装低级键盘钩子、不注入目标程序、不使用 `RIDEV_NOLEGACY` 抑制应用的常规输入消息。[本项目源码](main.cpp)
+- 低级钩子依赖安装线程的消息循环，回调超时可能被 Windows 静默移除。微软建议许多此类监控需求考虑 Raw Input，但这不是“Raw Input 永远不漏事件”的保证。[Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc)
+
+### 2. 显示内容与功能取舍不同
+
+- **Carnac**：原版定位为演示、录屏与快捷键学习工具。`doggy8088/carnac` 维护分支还提供快捷键名称、应用/按键过滤、多屏定位、丰富样式、静默模式及鼠标点击高亮等功能；不同版本不能混为一谈。[原版项目](https://github.com/Code52/carnac) · [维护分支介绍](https://carnac.gh.miniasp.com/)
+- **KeyDisplay**：直接显示 `S`、`Ctrl + S` 和 `LMB/RMB/MMB/X1/X2` 等事件名称，鼠标点击显示为文字，不以光标位置或高亮圈作为主要反馈。当前不提供快捷键语义库、应用过滤或多屏独立叠加。
+
+### 3. 实时更新与显示时长
+
+- **KeyDisplay** 在 `WM_INPUT` 处理期间更新状态并立即提交绘制；新事件不用等待上一条气泡结束。毫秒设置仅控制最近事件的保留时长，计时器只负责到期隐藏。
+- Carnac 的维护分支提供淡出时长、重复合并与快捷键序列处理等演示功能；不能将某个序列等待或动画时长解释成所有按键都具有同等输入延迟。[维护分支说明](https://carnac.gh.miniasp.com/)
+- **没有进行两者的同机延时或资源占用对比测试**。KeyDisplay 的即时提交绘制不等于物理输入到屏幕的零延时，也不代表已标定的测量精度。
+
+### 4. 程序形态与控制入口
+
+- **Carnac 原版** 为 C# 项目，README 要求 .NET Framework 4.5.2；维护分支的介绍也注明该运行环境，并以系统托盘作为主要控制入口。[原版 README](https://github.com/Code52/carnac) · [维护分支介绍](https://carnac.gh.miniasp.com/)
+- **KeyDisplay** 使用 C++ / Win32 / GDI+，当前 Windows x64 下载版无需额外安装本项目运行时。v1.3.1 提供可见控制窗口、任务栏入口，以及明确的 **设置 / 退出** 导航与按钮；退出或主窗口右上角 × 走统一清理流程。这里不据此宣称它的 CPU、内存占用更低。
+
+### 5. 开源许可不同
+
+- **Carnac 原版** 使用 **MS-PL（Microsoft Public License）**：允许按条款修改与分发；分发其源码部分须附 MS-PL 并保留相关声明，不能直接把复制的 Carnac 源码换成 MIT。[Carnac 许可证全文](https://raw.githubusercontent.com/Code52/carnac/master/LICENSE.md)
+- **KeyDisplay** 独立实现，未复制 Carnac 源码，使用 **MIT** 许可证。[本项目 LICENSE](LICENSE)
+
+### 关于模拟器 / 远控窗口中不显示按键
+
+本项目的起点是一个用户报告的现象：Carnac 在本机普通应用输入时能显示，在特定模拟器或连接其他 Windows 设备的窗口内操作时不显示。**该现象的根因尚未被定位**，可能涉及权限、过滤设置、钩子链或输入路径；不应写成“Carnac 必然不能捕获虚拟机 / 远控输入”，也不能写成“KeyDisplay 已解决所有此类兼容问题”。
+
+KeyDisplay 观察的是**本机当前桌面会话可收到的 Windows 输入事件**，不监控 ADB，不要求部署到模拟器或远端设备。其他机器内部产生、USB 直通给来宾、未经过本机或安全桌面的输入不保证可见。用于延时测试前，应在实际环境验证事件覆盖，并标定本工具自身的可视反馈延迟。
+
+**选用建议**：需要丰富演示样式、快捷键解释和多屏布局，先考虑 Carnac 的对应版本；需要精简的本机事件文字反馈、毫秒保留设置和显式设置/退出入口，可以尝试 KeyDisplay。当前 Windows 实机验收范围和未验证项见下文及 [VERIFICATION.md](VERIFICATION.md)。
+
 ## 兼容性与限制
 
 - 主屏右下角，距屏幕边缘 24 像素；多屏独立叠加尚未实现。
