@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// KeyDisplay v1.3 — Win32 Raw Input, read-only input overlay.
+// KeyDisplay v1.3.1 — Win32 Raw Input, read-only input overlay.
 // No hooks, injection, drivers, telemetry or input logging.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -19,7 +19,7 @@
 #include "display_state.h"
 
 using namespace Gdiplus;
-static constexpr wchar_t kVersion[] = L"KeyDisplay v1.3";
+static constexpr wchar_t kVersion[] = L"KeyDisplay v1.3.1";
 static constexpr UINT kExpireTimer = 1;
 static constexpr UINT kTrayMessage = WM_APP + 1;
 static constexpr UINT kTraySettings = 101;
@@ -41,6 +41,10 @@ static HDC g_memDC = nullptr;
 static HBITMAP g_bitmap = nullptr, g_previousBitmap = nullptr;
 static BYTE* g_pixels = nullptr;
 static int g_width = 0, g_height = 0;
+static bool g_quitting = false;
+static bool g_rawRegistered = false;
+static bool g_trayAdded = false;
+static void QuitApplication();
 
 static std::wstring KeyName(UINT vk) {
     if (vk >= 'A' && vk <= 'Z') return std::wstring(1, static_cast<wchar_t>(vk));
@@ -134,7 +138,7 @@ static bool CreateSurface() {
 }
 
 static void RenderNow() {
-    if (!g_overlay || !g_pixels) return;
+    if (g_quitting || !g_overlay || !g_pixels) return;
     const bool visible = g_state.Visible(GetTickCount64());
     std::memset(g_pixels, 0, static_cast<size_t>(g_width) * g_height * 4);
     {
@@ -187,6 +191,7 @@ static void RenderNow() {
     g_visible = visible;
 }
 static void ArmExpiry() {
+    if (g_quitting || !g_overlay) return;
     KillTimer(g_overlay, kExpireTimer);
     const auto remaining = g_state.Remaining(GetTickCount64());
     if (remaining) SetTimer(g_overlay, kExpireTimer,
@@ -199,6 +204,7 @@ static void DisplayEvent() {
 }
 
 static void HandleRawInput(LPARAM parameter) {
+    if (g_quitting) return;
     UINT bytes = 0;
     if (GetRawInputData(reinterpret_cast<HRAWINPUT>(parameter), RID_INPUT, nullptr,
                        &bytes, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1) ||
@@ -307,18 +313,17 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wp, LPARAM 
 }
 static void OpenSettings() {
     if (g_settings) { ShowWindow(g_settings, SW_RESTORE); SetForegroundWindow(g_settings); return; }
-    g_settings = CreateWindowExW(0, L"KeyDisplaySettings", L"KeyDisplay v1.3 — 设置",
+    g_settings = CreateWindowExW(0, L"KeyDisplaySettings", L"KeyDisplay v1.3.1 — 设置",
                     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-                    452, 298, nullptr, nullptr, g_instance, nullptr);
+                    452, 298, g_control, nullptr, g_instance, nullptr);
     if (g_settings) { ShowWindow(g_settings, SW_SHOW); SetForegroundWindow(g_settings); }
     // Modeless window: the same message pump continues servicing WM_INPUT.
 }
 static void ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, kTraySettings, L"设置显示时长…");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayExit, L"退出 KeyDisplay");
+    AppendMenuW(menu, MF_STRING, kTraySettings, L"设置");
+    AppendMenuW(menu, MF_STRING, kTrayExit, L"退出");
     POINT point{}; GetCursorPos(&point);
     SetForegroundWindow(g_control);
     const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
@@ -326,15 +331,77 @@ static void ShowTrayMenu() {
     PostMessageW(g_control, WM_NULL, 0, 0);
     DestroyMenu(menu);
     if (choice == kTraySettings) OpenSettings();
-    if (choice == kTrayExit) PostMessageW(g_overlay, WM_CLOSE, 0, 0);
+    if (choice == kTrayExit) QuitApplication();
+}
+static void QuitApplication() {
+    // All exit entries use one idempotent shutdown path. Never hide-to-tray.
+    if (g_quitting) return;
+    g_quitting = true;
+    if (g_overlay) {
+        ShowWindow(g_overlay, SW_HIDE);
+        KillTimer(g_overlay, kExpireTimer);
+    }
+    if (g_rawRegistered) {
+        RAWINPUTDEVICE remove[2]{{0x01, 0x06, RIDEV_REMOVE, nullptr},
+                                  {0x01, 0x02, RIDEV_REMOVE, nullptr}};
+        RegisterRawInputDevices(remove, 2, sizeof(RAWINPUTDEVICE));
+        g_rawRegistered = false;
+    }
+    g_state.Clear();
+    if (g_trayAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_tray);
+        g_trayAdded = false;
+    }
+    if (g_settings) DestroyWindow(g_settings);
+    if (g_overlay && IsWindow(g_overlay)) DestroyWindow(g_overlay);
+    if (g_control && IsWindow(g_control)) DestroyWindow(g_control);
+    PostQuitMessage(0);
 }
 static LRESULT CALLBACK ControlProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     static const UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    if (message == taskbarCreated) { Shell_NotifyIconW(NIM_ADD, &g_tray); return 0; }
+    if (message == taskbarCreated && !g_quitting) {
+        g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_tray) != FALSE;
+        return 0;
+    }
     if (message == kTrayMessage) {
         if (lp == WM_RBUTTONUP) ShowTrayMenu();
+        if (lp == WM_LBUTTONUP) {
+            ShowWindow(g_control, SW_RESTORE);
+            SetForegroundWindow(g_control);
+        }
         if (lp == WM_LBUTTONDBLCLK) OpenSettings();
         return 0;
+    }
+    switch (message) {
+    case WM_CREATE: {
+        HMENU menu = CreateMenu();
+        if (!menu) return -1;
+        AppendMenuW(menu, MF_STRING, kTraySettings, L"设置");
+        AppendMenuW(menu, MF_STRING, kTrayExit, L"退出");
+        SetMenu(hwnd, menu);
+        if (!AddControl(hwnd, L"BUTTON", L"设置", WS_TABSTOP | BS_PUSHBUTTON,
+                        18, 18, 146, 42, kTraySettings) ||
+            !AddControl(hwnd, L"BUTTON", L"退出", WS_TABSTOP | BS_PUSHBUTTON,
+                        182, 18, 146, 42, kTrayExit)) return -1;
+        AddControl(hwnd, L"STATIC", L"最小化继续显示；点退出或右上角 × 完全退出。",
+                   0, 18, 78, 326, 50, 0);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == kTraySettings) { OpenSettings(); return 0; }
+        if (LOWORD(wp) == kTrayExit) { QuitApplication(); return 0; }
+        break;
+    case WM_CLOSE:
+        QuitApplication();
+        return 0;
+    case WM_ENDSESSION:
+        if (wp) QuitApplication();
+        return 0;
+    case WM_DESTROY:
+        if (g_control == hwnd) g_control = nullptr;
+        QuitApplication();
+        return 0;
+    default: break;
     }
     return DefWindowProcW(hwnd, message, wp, lp);
 }
@@ -359,11 +426,12 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wp, LPARAM l
     case WM_PAINT: {
         PAINTSTRUCT ps{}; BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps); return 0;
     }
+    case WM_CLOSE:
+        QuitApplication();
+        return 0;
     case WM_DESTROY:
-        KillTimer(hwnd, kExpireTimer);
-        Shell_NotifyIconW(NIM_DELETE, &g_tray);
-        if (g_settings) DestroyWindow(g_settings);
-        PostQuitMessage(0);
+        if (g_overlay == hwnd) g_overlay = nullptr;
+        QuitApplication();
         return 0;
     default: return DefWindowProcW(hwnd, message, wp, lp);
     }
@@ -396,11 +464,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
                            DEFAULT_PITCH, L"Microsoft YaHei UI");
     LoadConfig();
     if (!RegisterClassFor(L"KeyDisplayOverlay", OverlayProc, nullptr) ||
-        !RegisterClassFor(L"KeyDisplayControl", ControlProc, nullptr) ||
+        !RegisterClassFor(L"KeyDisplayControl", ControlProc,
+                          reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1)) ||
         !RegisterClassFor(L"KeyDisplaySettings", SettingsProc,
                           reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1))) return 1;
-    g_control = CreateWindowExW(WS_EX_TOOLWINDOW, L"KeyDisplayControl", kVersion,
-                                WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+    g_control = CreateWindowExW(WS_EX_APPWINDOW, L"KeyDisplayControl", kVersion,
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 366, 196,
+                                nullptr, nullptr, instance, nullptr);
     g_overlay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
                                 WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                                 L"KeyDisplayOverlay", kVersion, WS_POPUP,
@@ -418,27 +489,28 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         MessageBoxW(nullptr, L"Raw Input 注册失败，程序将退出。", kVersion, MB_OK | MB_ICONERROR);
         DestroyWindow(g_overlay); FreeSurface(); return 1;
     }
+    g_rawRegistered = true;
     g_tray.cbSize = sizeof(g_tray); g_tray.hWnd = g_control; g_tray.uID = 1;
     g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_tray.uCallbackMessage = kTrayMessage;
     g_tray.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    lstrcpynW(g_tray.szTip, L"KeyDisplay v1.3 — 右键设置，双击打开设置", 128);
-    if (!Shell_NotifyIconW(NIM_ADD, &g_tray)) {
-        MessageBoxW(nullptr, L"无法添加托盘入口，程序将退出。", kVersion, MB_OK | MB_ICONERROR);
-        DestroyWindow(g_overlay); FreeSurface(); return 1;
-    }
+    lstrcpynW(g_tray.szTip, L"KeyDisplay v1.3.1 — 右键：设置 / 退出", 128);
+    // Tray is optional. The visible taskbar window always provides an exit.
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_tray) != FALSE;
     RenderNow();  // Apply transparent pixels BEFORE showing the layered window.
+    ShowWindow(g_control, SW_SHOWNOACTIVATE);
+    UpdateWindow(g_control);
     MSG message{};
     int result = 0;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {
         if (g_settings && IsDialogMessageW(g_settings, &message)) continue;
+        if (g_control && (message.hwnd == g_control || IsChild(g_control, message.hwnd)) &&
+            IsDialogMessageW(g_control, &message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-    RAWINPUTDEVICE remove[2]{{0x01, 0x06, RIDEV_REMOVE, nullptr},
-                              {0x01, 0x02, RIDEV_REMOVE, nullptr}};
-    RegisterRawInputDevices(remove, 2, sizeof(RAWINPUTDEVICE));
-    DestroyWindow(g_control); FreeSurface();
+    QuitApplication();
+    FreeSurface();
     if (g_uiFont) DeleteObject(g_uiFont);
     GdiplusShutdown(g_gdiToken); CloseHandle(mutex);
     return result == -1 ? 1 : 0;
